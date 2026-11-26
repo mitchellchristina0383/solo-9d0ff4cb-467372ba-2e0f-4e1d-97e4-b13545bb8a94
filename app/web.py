@@ -3,6 +3,8 @@
 - ``/``                值班员操作页面（贴记录、设 TTL/初版/次数上限）
 - ``POST /api/replay`` 先跑原记录，未读到旧版即报两边版本并停止；
                        否则按次数上限做记录缩短
+- ``/capacity``        回源容量试算页（多站点预热排程 / 逐秒回源峰值）
+- ``POST /api/capacity`` 试算最低回源峰值、预热时刻、逐秒回源与额度缺口
 - ``/healthz``         容器健康检查
 - ``/demo/*``          内置本地源站与带有效期缓存代理的演示接口，
                        供值班员手动体验换版 / 查代理 / 推进时钟
@@ -10,10 +12,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, Flask, jsonify, render_template, request
 
+from .capacity import (
+    MAX_SITES,
+    MAX_QUOTA,
+    SiteSpec,
+    parse_access_times,
+    plan_capacity,
+)
 from .replay import ReplayError, minimize_record, parse_record, replay_record
 
 MAX_RECORD_BYTES = 64 * 1024
@@ -32,6 +41,12 @@ SAMPLE_RECORD = """\
 查代理
 """
 
+# 容量试算页的示例：两个站点在旧缓存未到期时就要读新版。
+SAMPLE_SITES = [
+    {"name": "华东站", "ttl": 30, "remaining": 20, "accesses": "3, 8"},
+    {"name": "华南站", "ttl": 20, "remaining": 15, "accesses": "5"},
+]
+
 
 @bp.get("/healthz")
 def healthz() -> Any:
@@ -43,8 +58,17 @@ def index() -> Any:
     return render_template("index.html", sample_record=SAMPLE_RECORD)
 
 
-def _form_int(value: Any, field_name: str, default: int, minimum: int, maximum: int) -> int:
+def _form_int(
+    value: Any,
+    field_name: str,
+    default: Optional[int],
+    minimum: int,
+    maximum: int,
+) -> int:
+    """解析并校验表单整数；``default`` 为 None 表示该项必填。"""
     if value is None or str(value).strip() == "":
+        if default is None:
+            raise ReplayError(f"{field_name} 不能为空")
         return default
     try:
         parsed = int(str(value).strip())
@@ -94,6 +118,64 @@ def api_replay() -> Any:
 @bp.errorhandler(ReplayError)
 def handle_replay_error(exc: ReplayError) -> Any:
     return jsonify(ok=False, error=str(exc)), 400
+
+
+# ---------------------------------------------------------------------------
+# 回源容量试算：值班员填源站每秒可用额度与各站点代理的 TTL / 旧缓存剩余 /
+# 预计访问时刻，求满足必读新版访问的最低回源峰值与预热时刻。
+# ---------------------------------------------------------------------------
+
+@bp.get("/capacity")
+def capacity_page() -> Any:
+    return render_template("capacity.html", sample_sites=SAMPLE_SITES)
+
+
+@bp.post("/api/capacity")
+def api_capacity() -> Any:
+    quota = _form_int(
+        request.form.get("quota"),
+        "源站每秒可用额度",
+        default=None,
+        minimum=0,
+        maximum=MAX_QUOTA,
+    )
+
+    # 表单按 sites 数组合并提交：site_name[i] / ttl[i] / remaining[i] / accesses[i]。
+    names = request.form.getlist("site_name")
+    ttls = request.form.getlist("ttl")
+    remainings = request.form.getlist("remaining")
+    access_lists = request.form.getlist("accesses")
+    all_required = (request.form.get("all_required") or "1").strip() != "0"
+
+    if not names:
+        raise ReplayError("至少需要填写 1 个站点")
+    if len(names) > MAX_SITES:
+        raise ReplayError(f"站点最多 {MAX_SITES} 个")
+    if not (len(names) == len(ttls) == len(remainings) == len(access_lists)):
+        raise ReplayError("站点参数列数不一致，请刷新页面后重试")
+
+    sites: List[SiteSpec] = []
+    for index, name in enumerate(names, start=1):
+        label = str(name or "").strip() or f"站点{index}"
+        site_ttl = _form_int(ttls[index - 1], f"站点 {label!r} 的 TTL(秒)", 30, 1, 86_400)
+        remaining = _form_int(
+            remainings[index - 1],
+            f"站点 {label!r} 的旧缓存剩余秒数",
+            site_ttl,
+            0,
+            site_ttl,
+        )
+        accesses = parse_access_times(
+            access_lists[index - 1],
+            site_name=label,
+            all_required=all_required,
+        )
+        sites.append(
+            SiteSpec(name=label, ttl=site_ttl, remaining=remaining, accesses=accesses)
+        )
+
+    report = plan_capacity(sites, quota=quota)
+    return jsonify(report.to_dict())
 
 
 # ---------------------------------------------------------------------------

@@ -104,3 +104,96 @@ def test_demo_reset_restores_initial_state(client):
     assert d["origin_version"] == "build-1"
     assert d["proxy_version"] == "build-1"
     assert d["clock"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 容量试算页与 API
+# ---------------------------------------------------------------------------
+
+def _capacity_form(quota, sites, all_required=True):
+    form = {"quota": str(quota), "all_required": "1" if all_required else "0"}
+    form["site_name"] = [s["name"] for s in sites]
+    form["ttl"] = [str(s["ttl"]) for s in sites]
+    form["remaining"] = [str(s["remaining"]) for s in sites]
+    form["accesses"] = [s["accesses"] for s in sites]
+    return form
+
+
+def test_capacity_page(client):
+    resp = client.get("/capacity")
+    assert resp.status_code == 200
+    assert "源站回源容量试算".encode() in resp.data
+
+
+def test_capacity_api_sufficient(client):
+    sites = [{"name": "A", "ttl": 30, "remaining": 20, "accesses": "3"}]
+    resp = client.post("/api/capacity", data=_capacity_form(5, sites))
+    assert resp.status_code == 200
+    d = resp.get_json()
+    assert d["min_peak"] == 1
+    assert d["sufficient"] is True
+    assert d["required_peak_increase"] == 0
+    assert d["window_start"] == 0 and d["window_end"] == 12
+    assert len(d["per_second"]) == 13
+    assert d["sites"][0]["accesses"][0]["reads_new"] is True
+
+
+def test_capacity_api_quota_shortfall(client):
+    sites = [
+        {"name": "A", "ttl": 10, "remaining": 5, "accesses": "0"},
+        {"name": "B", "ttl": 10, "remaining": 5, "accesses": "0"},
+        {"name": "C", "ttl": 10, "remaining": 5, "accesses": "0"},
+    ]
+    resp = client.post("/api/capacity", data=_capacity_form(1, sites))
+    d = resp.get_json()
+    assert d["min_peak"] == 3
+    assert d["sufficient"] is False
+    assert d["required_peak_increase"] == 2
+    assert d["overloaded_seconds"] == [0]
+    assert d["per_second"][0]["increase"] == 2
+
+
+def test_capacity_api_prewarm_then_re_expiry(client):
+    sites = [
+        {"name": "短TTL", "ttl": 2, "remaining": 2, "accesses": "1, 4"},
+        {"name": "长TTL", "ttl": 30, "remaining": 20, "accesses": "4!"},
+    ]
+    resp = client.post("/api/capacity", data=_capacity_form(1, sites))
+    d = resp.get_json()
+    assert d["min_peak"] == 1
+    assert d["prewarm_times"]["短TTL"] == 1
+    short_site = d["sites"][0]
+    outcomes = {a["second"]: a for a in short_site["accesses"]}
+    assert outcomes[1]["served_from"] == "cache" and outcomes[1]["reads_new"] is True
+    assert outcomes[4]["served_from"] == "origin" and outcomes[4]["reads_new"] is True
+    assert d["per_second_load"][1] == 1 and d["per_second_load"][4] == 1
+
+
+def test_capacity_api_validation_errors(client):
+    r1 = client.post("/api/capacity", data={"quota": "1"})
+    assert r1.status_code == 400
+    assert "至少需要填写 1 个站点" in r1.get_json()["error"]
+
+    no_quota = _capacity_form(1, [{"name": "A", "ttl": 10, "remaining": 5, "accesses": "1"}])
+    no_quota["quota"] = ""
+    r5 = client.post("/api/capacity", data=no_quota)
+    assert r5.status_code == 400
+    assert "可用额度 不能为空" in r5.get_json()["error"]
+
+    bad_ttl = _capacity_form(5, [{"name": "A", "ttl": 3, "remaining": 5, "accesses": "2"}])
+    r2 = client.post("/api/capacity", data=bad_ttl)
+    assert r2.status_code == 400
+    assert "旧缓存剩余秒数" in r2.get_json()["error"]
+
+    too_many = _capacity_form(
+        5,
+        [{"name": f"S{i}", "ttl": 10, "remaining": 5, "accesses": "1"} for i in range(5)],
+    )
+    r3 = client.post("/api/capacity", data=too_many)
+    assert r3.status_code == 400
+    assert "最多 4" in r3.get_json()["error"]
+
+    empty_access = _capacity_form(5, [{"name": "A", "ttl": 10, "remaining": 5, "accesses": " "}])
+    r4 = client.post("/api/capacity", data=empty_access)
+    assert r4.status_code == 400
+    assert "预计访问时刻" in r4.get_json()["error"]

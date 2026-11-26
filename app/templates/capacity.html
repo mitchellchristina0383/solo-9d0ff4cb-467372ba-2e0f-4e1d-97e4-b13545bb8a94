@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>源站回源容量试算 · 缓存回放台</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #ffffff; --line: #e2e8f0; --text: #1e293b;
+    --muted: #64748b; --blue: #2563eb; --red: #dc2626; --amber: #d97706;
+    --green: #16a34a; --chip: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #f8fafc; color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header { background: var(--bg); color: #fff; padding: 18px 28px; }
+  header h1 { margin: 0; font-size: 19px; }
+  header p { margin: 4px 0 0; color: #94a3b8; font-size: 13px; }
+  header nav { margin-top: 10px; font-size: 13px; }
+  header nav a { color: #93c5fd; margin-right: 14px; text-decoration: none; }
+  header nav a:hover { text-decoration: underline; }
+  main { max-width: 1180px; margin: 22px auto; padding: 0 20px 60px; }
+  .grid { display: grid; grid-template-columns: 470px 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  input {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 10px; font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  button {
+    cursor: pointer; border: 0; border-radius: 8px; padding: 10px 16px;
+    font: inherit; font-weight: 600;
+  }
+  .primary { background: var(--blue); color: #fff; width: 100%; margin-top: 16px; }
+  .primary:disabled { opacity: .55; cursor: wait; }
+  .ghost { background: var(--chip); color: var(--text); }
+  .small { padding: 5px 10px; font-size: 12px; }
+  .banner { border-radius: 10px; padding: 13px 16px; margin-bottom: 14px; font-weight: 600; }
+  .banner.good { background: #dcfce7; color: var(--green); border: 1px solid #86efac; }
+  .banner.bad { background: #fee2e2; color: var(--red); border: 1px solid #fca5a5; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 8px 0; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; background: #f8fafc; }
+  td.mono, .mono { font-family: ui-monospace, Menlo, monospace; }
+  .badge { display: inline-block; border-radius: 6px; padding: 1px 7px; font-size: 12px; font-weight: 700; }
+  .b-prewarm { background: #dbeafe; color: #1d4ed8; }
+  .b-access { background: #dcfce7; color: #15803d; }
+  .b-old { background: #fee2e2; color: var(--red); }
+  .b-new { background: #dcfce7; color: var(--green); }
+  .b-over { background: #fee2e2; color: var(--red); }
+  .over-row { background: #fef2f2; }
+  .stale { color: var(--red); font-weight: 700; }
+  .ok-ver { color: var(--green); font-weight: 700; }
+  .site-card { border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 12px; }
+  .site-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .site-head strong { font-size: 13px; }
+  details { margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; padding: 0 14px; }
+  summary { cursor: pointer; padding: 12px 0; font-weight: 700; }
+  details .body { padding-bottom: 14px; }
+  .table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+  .hidden { display: none; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .legend code { background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>源站回源容量试算</h1>
+  <p>填源站每秒可用额度与各站点代理的 TTL / 旧缓存剩余秒数 / 预计访问时刻，算出满足必读新版访问的最低回源峰值、预热时刻与逐秒回源数。</p>
+  <nav><a href="/">← 返回故障步骤回放台</a></nav>
+</header>
+
+<main class="grid">
+  <section class="card">
+    <h2>输入：额度与站点</h2>
+    <form id="cap-form">
+      <label for="quota">源站每秒可用回源额度（次/秒）</label>
+      <input id="quota" name="quota" type="number" value="1" min="0">
+
+      <div class="toolbar">
+        <button type="button" class="ghost small" id="add-site">添加站点（最多 4 个）</button>
+      </div>
+      <div id="sites"></div>
+
+      <label class="hint" style="margin-top:14px;display:flex;gap:8px;align-items:center;font-weight:400;">
+        <input type="checkbox" id="all_required" name="all_required" value="1" checked
+               style="width:auto;margin:0;">
+        未标注的访问时刻默认按「必读新版」处理（取消勾选后可只按标注判断）
+      </label>
+      <div class="legend">
+        访问时刻写法：<code>3, 8</code> 逐秒列出，<code>2-5</code> 表示 2~5 秒闭区间；
+        <code>3!</code>（或 <code>3*</code>）标为必读新版，<code>3?</code> 表示仅观察。
+        第 0 秒换版，窗口第 0~12 秒（含）。
+      </div>
+
+      <button class="primary" type="submit" id="submit-btn">试算最低回源峰值</button>
+      <div class="toolbar">
+        <button type="button" class="ghost small" id="fill-prewarm-expiry">示例：预热后再次到期</button>
+        <button type="button" class="ghost small" id="fill-quota-short">示例：额度不足</button>
+      </div>
+      <div class="hint" id="form-error" style="color:var(--red);font-weight:600;margin-top:8px;"></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>试算结果</h2>
+    <div id="result-empty" class="hint">提交后在此查看最低回源峰值、各站预热时刻、逐秒回源数与额度缺口。</div>
+    <div id="result" class="hidden"></div>
+  </section>
+</main>
+
+<script>
+const SAMPLE_SITES = {{ sample_sites | tojson }};
+const MAX_SITES = 4;
+
+let siteIndex = 0;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+
+function siteRow(data = {}) {
+  const i = siteIndex++;
+  const wrap = document.createElement("div");
+  wrap.className = "site-card";
+  wrap.dataset.site = String(i);
+  wrap.innerHTML = `
+    <div class="site-head">
+      <strong>站点</strong>
+      <button type="button" class="ghost small" data-remove="${i}">删除</button>
+    </div>
+    <div class="row">
+      <div><label>名称</label>
+        <input name="site_name" value="${esc(data.name || "")}" placeholder="如 华东站"></div>
+    </div>
+    <div class="row">
+      <div><label>TTL（秒）</label>
+        <input name="ttl" type="number" min="1" value="${esc(data.ttl ?? 30)}"></div>
+      <div><label>旧缓存还剩（秒）</label>
+        <input name="remaining" type="number" min="0" value="${esc(data.remaining ?? 20)}"></div>
+    </div>
+    <label>预计访问时刻</label>
+    <input name="accesses" value="${esc(data.accesses || "")}" placeholder="如 3, 8">
+  `;
+  wrap.querySelector("[data-remove]").addEventListener("click", () => {
+    wrap.remove();
+    renumber();
+  });
+  return wrap;
+}
+
+function renumber() {
+  const wraps = document.querySelectorAll(".site-card");
+  wraps.forEach((w, idx) => {
+    w.querySelector(".site-head strong").textContent = `站点 ${idx + 1}`;
+    w.querySelector("[data-remove]").disabled = wraps.length <= 1;
+  });
+  document.getElementById("add-site").disabled = wraps.length >= MAX_SITES;
+}
+
+function addSite(data) {
+  const host = document.getElementById("sites");
+  if (host.querySelectorAll(".site-card").length >= MAX_SITES) return;
+  host.appendChild(siteRow(data));
+  renumber();
+}
+
+function resetSites(items) {
+  document.getElementById("sites").innerHTML = "";
+  siteIndex = 0;
+  items.forEach(addSite);
+  renumber();
+}
+
+document.getElementById("add-site").addEventListener("click", () => addSite());
+
+function fillScenario(items, quota, allRequired = true, note = "") {
+  resetSites(items);
+  document.getElementById("quota").value = String(quota);
+  document.getElementById("all_required").checked = allRequired;
+  document.getElementById("form-error").textContent = note;
+  document.getElementById("cap-form").requestSubmit();
+}
+
+document.getElementById("fill-prewarm-expiry").addEventListener("click", () =>
+  fillScenario(
+    [{ name: "短 TTL 站", ttl: 2, remaining: 2, accesses: "1, 4" },
+     { name: "长 TTL 站", ttl: 30, remaining: 20, accesses: "4!" }],
+    1, true,
+    "示例要点：短 TTL 站须在第 1 秒前预热，第 3 秒 TTL 到期，第 4 秒访问再次回源；长 TTL 站用于错峰预热。",
+  ));
+
+document.getElementById("fill-quota-short").addEventListener("click", () =>
+  fillScenario(
+    [{ name: "A 站", ttl: 10, remaining: 5, accesses: "0!" },
+     { name: "B 站", ttl: 10, remaining: 5, accesses: "0!" },
+     { name: "C 站", ttl: 10, remaining: 5, accesses: "0!" }],
+    1, true,
+    "示例要点：三个站都在第 0 秒就要读新版，最低峰值 3 次/秒，额度只有 1 次/秒。",
+  ));
+
+function badge(kind, label) {
+  return `<span class="badge b-${esc(kind)}">${esc(label)}</span>`;
+}
+
+function perSecondTable(d) {
+  const rows = d.per_second.map(p => {
+    const fetches = p.fetches.length
+      ? p.fetches.map(f => `${esc(f.site)}/${esc(f.kind_label)}`).join("<br>")
+      : "—";
+    const status = p.overloaded
+      ? `<span class="b-over">超 ${p.over}，至少需 +${p.increase}</span>`
+      : (p.load === d.min_peak && d.min_peak > 0 ? '<span class="ok-ver">达到峰值</span>' : "");
+    return `
+      <tr class="${p.overloaded ? "over-row" : ""}">
+        <td class="mono">${p.second}s</td>
+        <td class="mono"><strong>${p.load}</strong></td>
+        <td class="mono">${p.quota}</td>
+        <td>${status}</td>
+        <td class="mono">${fetches}</td>
+      </tr>`;
+  }).join("");
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>秒</th><th>回源数</th><th>额度</th><th>额度核对</th><th>回源明细（站点/类型）</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function siteBlock(s, quota) {
+  const peaks = s.fetches_by_second.map((v, i) => ({second: i, v}))
+    .filter(x => x.v > 0).map(x => `${x.second}s×${x.v}`).join("，") || "无回源";
+  const rows = s.accesses.map(a => `
+    <tr class="${a.required && !a.reads_new ? "over-row" : ""}">
+      <td class="mono">${a.second}s</td>
+      <td>${a.required ? badge("old", "必读新版") : badge("access", "仅观察")}</td>
+      <td>${a.at_risk ? "旧缓存未到期" : "旧缓存已到期"}</td>
+      <td>${a.served_from_label}</td>
+      <td class="${a.version === "old" ? "stale" : "ok-ver"}">${esc(a.version_label)}</td>
+      <td>${esc(a.note)}</td>
+    </tr>`).join("");
+  return `
+    <details open><summary>${esc(s.name)} ＜TTL ${s.ttl}s，旧缓存还剩 ${s.remaining}s＞</summary>
+      <div class="body">
+        <dl class="kv">
+          <dt>预热时刻</dt><dd>${s.prewarm_time === null ? "不预热" : "第 " + s.prewarm_time + " 秒"}</dd>
+          <dt>说明</dt><dd style="font-family:inherit;font-weight:400;">${esc(s.prewarm_note)}</dd>
+          <dt>逐秒回源</dt><dd>${esc(peaks)}</dd>
+        </dl>
+        <div class="table-wrap"><table>
+          <thead><tr><th>访问秒</th><th>类型</th><th>缓存状态</th><th>来源</th><th>版本</th><th>说明</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+      </div>
+    </details>`;
+}
+
+function render(d) {
+  const el = document.getElementById("result");
+  const banner = d.sufficient
+    ? `<div class="banner good">额度足够：最低回源峰值 ${d.min_peak} 次/秒 ≤ 现额度 ${d.quota} 次/秒，按下列预热时刻即可满足全部必读新版访问。</div>`
+    : `<div class="banner bad">额度不足：最低回源峰值 ${d.min_peak} 次/秒 > 现额度 ${d.quota} 次/秒，峰值秒至少需增加 ${d.required_peak_increase} 次/秒额度，并逐秒核对下方红色行。</div>`;
+
+  const prewarmLines = d.sites
+    .map(s => `${esc(s.name)}：${s.prewarm_time === null ? "不预热" : "第 " + s.prewarm_time + " 秒预热"}`)
+    .join("<br>");
+  const allTime = d.sites.map(s => s.prewarm_time === null ? "不预热" : `${s.prewarm_time}s`).join(" / ");
+  const overLines = d.overloaded_seconds.length
+    ? d.per_second.filter(p => p.overloaded)
+        .map(p => `第 ${p.second} 秒：回源 ${p.load} > 额度 ${p.quota}，至少增加 ${p.increase}`)
+        .join("<br>")
+    : "无（逐秒回源都不超过现有额度）";
+
+  el.innerHTML = `
+    ${banner}
+    <dl class="kv">
+      <dt>最低回源峰值</dt><dd>${d.min_peak} 次/秒（首个峰值秒 ${d.peak_second}s）</dd>
+      <dt>现额度 / 单秒最大缺口</dt><dd>${d.quota} 次/秒 / ${d.required_peak_increase} 次/秒</dd>
+      <dt>窗口</dt><dd>第 ${d.window_start}~${d.window_end} 秒（共 ${d.per_second.length} 个秒点）</dd>
+      <dt>总回源次数</dt><dd>${d.total_fetches}</dd>
+      <dt>达到最低峰值的排程数</dt><dd>${d.optimal_plan_count}（下表为其中一个，同秒先预热再处理访问）</dd>
+      <dt>预热时刻</dt><dd>${prewarmLines}</dd>
+    </dl>
+
+    <label>须增加的额度（逐秒）</label>
+    <div class="hint" style="margin-bottom:6px;">${overLines}</div>
+
+    <label>逐秒回源数（最低峰值排程）</label>
+    <div class="hint" style="margin-bottom:6px;">预热 / 访问触发的回源都计入当秒；各站预热时刻：${allTime}</div>
+    ${perSecondTable(d)}
+
+    <label style="margin-top:16px;">各站点访问实测</label>
+    <div class="hint">标红的行为「必读新版但未满足」；本次最低峰值排程下必读访问全部满足。</div>
+    ${d.sites.map(s => siteBlock(s, d.quota)).join("")}
+  `;
+  document.getElementById("result-empty").classList.add("hidden");
+  el.classList.remove("hidden");
+}
+
+document.getElementById("cap-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = document.getElementById("submit-btn");
+  const errEl = document.getElementById("form-error");
+  errEl.textContent = "";
+  btn.disabled = true;
+  try {
+    const form = new FormData();
+    form.set("quota", document.getElementById("quota").value);
+    form.set("all_required", document.getElementById("all_required").checked ? "1" : "0");
+    document.querySelectorAll(".site-card").forEach(w => {
+      w.querySelectorAll("input[name]").forEach(inp => form.append(inp.name, inp.value));
+    });
+    const resp = await fetch("/api/capacity", { method: "POST", body: form });
+    const data = await resp.json();
+    if (!resp.ok) {
+      errEl.textContent = data.error || "请求失败";
+      return;
+    }
+    render(data);
+  } catch (e) {
+    errEl.textContent = "网络或服务异常：" + e;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+resetSites(SAMPLE_SITES);
+</script>
+</body>
+</html>
