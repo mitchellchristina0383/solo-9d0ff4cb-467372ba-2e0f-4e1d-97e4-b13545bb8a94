@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>缓存陈旧故障步骤回放台</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #ffffff; --line: #e2e8f0; --text: #1e293b;
+    --muted: #64748b; --blue: #2563eb; --red: #dc2626; --amber: #d97706;
+    --green: #16a34a; --chip: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #f8fafc; color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header { background: var(--bg); color: #fff; padding: 18px 28px; }
+  header h1 { margin: 0; font-size: 19px; }
+  header p { margin: 4px 0 0; color: #94a3b8; font-size: 13px; }
+  main { max-width: 1180px; margin: 22px auto; padding: 0 20px 60px; }
+  .grid { display: grid; grid-template-columns: 430px 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  textarea, input {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 10px; font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  textarea { min-height: 230px; resize: vertical; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  button {
+    cursor: pointer; border: 0; border-radius: 8px; padding: 10px 16px;
+    font: inherit; font-weight: 600;
+  }
+  .primary { background: var(--blue); color: #fff; width: 100%; margin-top: 16px; }
+  .primary:disabled { opacity: .55; cursor: wait; }
+  .ghost { background: var(--chip); color: var(--text); }
+  .small { padding: 5px 10px; font-size: 12px; }
+  .banner { border-radius: 10px; padding: 13px 16px; margin-bottom: 14px; font-weight: 600; }
+  .banner.minimal { background: #dcfce7; color: var(--green); border: 1px solid #86efac; }
+  .banner.unverified { background: #fef3c7; color: var(--amber); border: 1px solid #fcd34d; }
+  .banner.not_reproduced { background: #fee2e2; color: var(--red); border: 1px solid #fca5a5; }
+  .banner.error { background: #fee2e2; color: var(--red); border: 1px solid #fca5a5; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 8px 0; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+  pre.record {
+    background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 10px;
+    overflow: auto; font-size: 13px; margin: 8px 0;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; background: #f8fafc; position: sticky; top: 0; }
+  td.mono, .mono { font-family: ui-monospace, Menlo, monospace; }
+  .op-tag { display: inline-block; min-width: 48px; text-align: center; border-radius: 6px; padding: 1px 7px; font-size: 12px; font-weight: 700; }
+  .op-deploy { background: #dbeafe; color: #1d4ed8; }
+  .op-query { background: #dcfce7; color: #15803d; }
+  .op-advance { background: #fef3c7; color: #b45309; }
+  details { margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; padding: 0 14px; }
+  summary { cursor: pointer; padding: 12px 0; font-weight: 700; }
+  details .body { padding-bottom: 14px; }
+  .table-wrap { max-height: 360px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+  .stale { color: var(--red); font-weight: 700; }
+  .ok-ver { color: var(--green); font-weight: 700; }
+  #demo-output { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px;
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; min-height: 42px; white-space: pre-wrap; margin-top: 10px; }
+  .demo-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .hidden { display: none; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin: 6px 0 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>缓存陈旧 · 故障步骤回放台</h1>
+  <p>贴入换版 / 查代理 / 推进时钟记录，从同一初态回放并自动缩短；末步固定为查询。内置本地源站与带有效期缓存代理。</p>
+</header>
+
+<main class="grid">
+  <section class="card">
+    <h2>操作记录与回放参数</h2>
+    <form id="replay-form">
+      <label for="record">操作记录（每行一步，支持中文或 JSON 行）</label>
+      <textarea id="record" name="record" placeholder="查代理&#10;换版 build-2&#10;推进时钟 30&#10;查代理"></textarea>
+      <div class="toolbar">
+        <button type="button" class="ghost small" id="fill-sample">填入示例记录</button>
+        <span class="hint">操作：换版 deploy / 查代理 query / 推进时钟 advance</span>
+      </div>
+      <div class="row">
+        <div>
+          <label for="ttl">缓存有效期 TTL（秒）</label>
+          <input id="ttl" name="ttl" type="number" value="30" min="1">
+        </div>
+        <div>
+          <label for="initial_version">源站初态版本</label>
+          <input id="initial_version" name="initial_version" value="build-1">
+        </div>
+      </div>
+      <label for="replay_limit">回放次数上限</label>
+      <input id="replay_limit" name="replay_limit" type="number" value="100" min="1">
+      <div class="hint">含原记录首跑；每次尝试都从同一初态重新回放。</div>
+      <button class="primary" type="submit" id="submit-btn">从同一初态回放并缩短</button>
+      <div class="hint" id="form-error" style="color:var(--red);font-weight:600;margin-top:8px;"></div>
+    </form>
+
+    <details style="margin-top:18px;">
+      <summary>内置源站 / 缓存代理 手动演示</summary>
+      <div class="body">
+        <p class="hint">演示接口与回放引擎共用同一套组件，但使用独立状态；点“重置演示”可回到初态。</p>
+        <div class="row">
+          <div>
+            <label>演示 TTL（秒）</label>
+            <input id="demo-ttl" type="number" value="30" min="1">
+          </div>
+          <div>
+            <label>演示初态版本</label>
+            <input id="demo-ver" value="build-1">
+          </div>
+        </div>
+        <div class="demo-row">
+          <button type="button" class="ghost small" data-demo="reset">重置演示</button>
+          <button type="button" class="ghost small" data-demo="deploy">换版（自动）</button>
+          <button type="button" class="ghost small" data-demo="advance">推进 30s</button>
+          <button type="button" class="ghost small" data-demo="query">查代理</button>
+        </div>
+        <div id="demo-output">尚未操作。</div>
+      </div>
+    </details>
+  </section>
+
+  <section class="card" id="result-card">
+    <h2>回放与缩短结果</h2>
+    <div id="result-empty" class="hint">提交记录后在此查看：原记录是否读到旧版、目标版本对、已复现的最短记录、回放预算与逐次尝试明细。</div>
+    <div id="result" class="hidden"></div>
+  </section>
+</main>
+
+<script>
+const SAMPLE = {{ sample_record | tojson }};
+const OP_LABEL = {deploy: "换版", query: "查代理", advance: "时钟"};
+
+document.getElementById("fill-sample").addEventListener("click", () => {
+  document.getElementById("record").value = SAMPLE;
+});
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+
+function opTag(op) {
+  return `<span class="op-tag op-${esc(op)}">${esc(OP_LABEL[op] || op)}</span>`;
+}
+
+function traceTable(trace) {
+  const rows = trace.trace.map(r => `
+    <tr>
+      <td>${r.index}</td>
+      <td>${opTag(r.op)} <span class="mono">${esc(r.raw)}</span></td>
+      <td class="mono">${r.clock}s</td>
+      <td class="mono">${esc(r.origin_version)}</td>
+      <td class="mono ${r.proxy_version && r.proxy_version !== r.origin_version ? "stale" : ""}">
+        ${r.proxy_version === null ? "—" : esc(r.proxy_version)}</td>
+      <td>${esc(r.detail)}</td>
+    </tr>`).join("");
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>#</th><th>操作</th><th>时钟</th><th>源站版本</th><th>代理版本</th><th>说明</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function logTable(log) {
+  const rows = log.map(l => `
+    <tr>
+      <td class="mono">${l.replay_no}</td>
+      <td>${esc(l.kind)}</td>
+      <td>${esc(l.note)}</td>
+      <td class="mono">${l.length}</td>
+      <td>${l.reproduced === null ? "—" : (l.reproduced
+        ? '<span class="ok-ver">复现</span>'
+        : '<span class="stale">未复现</span>')}</td>
+      <td class="mono">${esc(l.origin_version)} / ${esc(l.proxy_version)}</td>
+      <td class="mono">${l.remaining_budget}</td>
+    </tr>`).join("");
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>第几次</th><th>类型</th><th>内容</th><th>长度</th><th>结果</th>
+    <th>源站/代理</th><th>剩余次数</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function renderReport(d) {
+  const el = document.getElementById("result");
+  const bannerText = {
+    minimal: "精简完毕：单独删掉当前记录的任一前置操作都无法复现。",
+    unverified: "次数用完，仍有未核实的删除情形；以下为已复现的最短记录（未核完）。",
+    not_reproduced: "原记录未读到旧版：代理与源站版本一致，按规则停止，不做缩短。",
+  }[d.status] || "回放完成。";
+
+  const pair = d.target_pair ? `${esc(d.target_pair[0])} ／ 代理 ${esc(d.target_pair[1])}` : "—";
+  const shortestText = d.shortest_steps.map(s => s.raw).join("\n");
+
+  let body = `
+    <div class="banner ${esc(d.status)}">${esc(bannerText)}</div>
+    <dl class="kv">
+      <dt>状态</dt><dd>${esc(d.status)}</dd>
+      <dt>目标版本对（源站/代理）</dt><dd class="${d.status === "not_reproduced" ? "ok-ver" : "stale"}">${pair}</dd>
+      <dt>初态 / TTL</dt><dd class="mono">${esc(d.initial_version)} / ${d.ttl}s</dd>
+      <dt>回放次数</dt><dd class="mono">${d.replays_used} / ${d.replay_limit}（剩余 ${d.remaining_budget}）</dd>
+      <dt>原记录 / 最短记录步数</dt><dd class="mono">${d.original_steps.length} → ${d.shortest_steps.length}</dd>
+    </dl>`;
+
+  if (d.status !== "not_reproduced") {
+    body += `
+      <label>已复现的最短记录（末步为查询，可直接交给缓存维护者）</label>
+      <pre class="record" id="shortest-pre">${esc(shortestText)}</pre>
+      <button type="button" class="ghost small" id="copy-btn">复制最短记录</button>`;
+  }
+
+  body += `
+    <details open><summary>最短记录回放轨迹</summary><div class="body">
+      <p class="hint">末步源站 ${esc(d.shortest_trace.final_origin_version)}，
+        代理 ${esc(d.shortest_trace.final_proxy_version)}
+        （与目标版本对${d.shortest_trace.reproduced ? "一致，复现成功" : "不一致"}）。</p>
+      ${traceTable(d.shortest_trace)}
+    </div></details>
+    <details><summary>原记录回放轨迹</summary><div class="body">${traceTable(d.original_trace)}</div></details>
+    <details><summary>逐次回放明细（${d.log.length} 次）</summary><div class="body">${logTable(d.log)}</div></details>`;
+
+  el.innerHTML = body;
+  document.getElementById("result-empty").classList.add("hidden");
+  el.classList.remove("hidden");
+
+  const copyBtn = document.getElementById("copy-btn");
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(shortestText);
+      copyBtn.textContent = "已复制";
+      setTimeout(() => (copyBtn.textContent = "复制最短记录"), 1500);
+    });
+  }
+}
+
+document.getElementById("replay-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = document.getElementById("submit-btn");
+  const errEl = document.getElementById("form-error");
+  errEl.textContent = "";
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/replay", { method: "POST", body: new FormData(ev.target) });
+    const data = await resp.json();
+    if (!resp.ok) {
+      errEl.textContent = data.error || "请求失败";
+      return;
+    }
+    renderReport(data);
+  } catch (e) {
+    errEl.textContent = "网络或服务异常：" + e;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+async function demoAction(kind) {
+  const out = document.getElementById("demo-output");
+  const form = new FormData();
+  if (kind === "reset") {
+    form.set("ttl", document.getElementById("demo-ttl").value);
+    form.set("initial_version", document.getElementById("demo-ver").value);
+  }
+  if (kind === "advance") form.set("seconds", "30");
+  const resp = await fetch(`/demo/${kind}`, { method: "POST", body: form });
+  const d = await resp.json();
+  out.textContent = JSON.stringify(d, null, 2);
+}
+document.querySelectorAll("[data-demo]").forEach(b =>
+  b.addEventListener("click", () => demoAction(b.dataset.demo)));
+</script>
+</body>
+</html>

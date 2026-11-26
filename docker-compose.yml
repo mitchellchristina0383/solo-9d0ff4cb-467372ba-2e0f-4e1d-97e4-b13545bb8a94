@@ -1,0 +1,25 @@
+services:
+  replay-web:
+    build:
+      context: .
+      target: base
+    image: cache-stale-replay:latest
+    container_name: cache-stale-replay-web
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status == 200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # 一次性自测服务：docker compose --profile test run --rm replay-selftest
+  replay-selftest:
+    build:
+      context: .
+      target: test
+    image: cache-stale-replay:test
+    profiles: ["test"]
+    container_name: cache-stale-replay-selftest
+    command: ["pytest", "-v", "tests"]
